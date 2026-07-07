@@ -1,0 +1,49 @@
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+.venv/
+env/
+ENV/
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (большие, не в git)
+*.pt
+*.pth
+*.onnx
+*.engine
+*.tflite
+weights/
+models/
+
+# Datasets
+datasets/
+data/calibration_*.json
+
+# Логи и дампы
+*.log
+logs/
+tmp/
+
+# RealSense recordings
+*.bag
+*.rosbag
+
+# Секреты
+.env
+*.token
+credentials.json

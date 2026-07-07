@@ -1,0 +1,28 @@
+{
+  "_comment": "Калибровка тактильных сенсоров RH56DFTP. Заполняется после тестов на стенде.",
+  "left_hand": {
+    "fingers": [
+      {"name": "thumb",  "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "index",  "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "middle", "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "ring",   "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "pinky",  "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095}
+    ]
+  },
+  "right_hand": {
+    "fingers": [
+      {"name": "thumb",  "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "index",  "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "middle", "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "ring",   "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095},
+      {"name": "pinky",  "slope": 1.0, "offset": 0.0, "raw_min": 0, "raw_max": 4095}
+    ]
+  },
+  "thresholds": {
+    "grip_target_force_g": 200.0,
+    "grip_max_force_g": 800.0,
+    "slip_threshold_g_per_s": 50.0,
+    "handover_external_force_g": 100.0,
+    "handover_internal_drop_g": 50.0
+  }
+}

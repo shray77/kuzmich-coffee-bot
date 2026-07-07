@@ -1,0 +1,34 @@
+# Кузьмич — основные зависимости
+# Ставить: pip install -r requirements.txt
+
+# Vision
+ultralytics>=8.3.0           # YOLOv8/v11
+pyrealsense2>=2.55.0         # Intel RealSense D435
+opencv-python>=4.10.0
+numpy>=1.26.0
+pillow>=10.4.0
+
+# Tactile
+pyserial>=3.5                # RS-485 для RH56DFTP
+
+# Voice
+openai-whisper>=20231117     # STT
+httpx>=0.27.0                # для Ollama API
+
+# Robot SDK
+# unitree_sdk2py             # ставится отдельно: pip install unitree_sdk2py
+# livox-sdk2                 # ставится отдельно, см. https://github.com/Livox-SDK/Livox-SDK2
+
+# Planning
+py-trees>=0.9.0              # behavior trees (опционально, есть свой)
+
+# Control / Safety
+scipy>=1.13.0                # фильтры, оптимизация
+
+# Dev
+pytest>=8.0.0
+ipython>=8.20.0
+
+# Опционально (для симуляции)
+# isaacsim[extscache]==4.2.0 # NVIDIA Isaac Sim (большая установка)
+# mujoco>=3.1.0
