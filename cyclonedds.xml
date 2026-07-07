@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!--
+  CycloneDDS конфиг для подключения к Unitree G1.
+
+  Перед запуском:
+    export CYCLONEDDS_URI=file://$(pwd)/cyclonedds.xml
+
+  NetworkInterfaceAddress — IP твоего ПК в подсети G1 (192.168.123.x).
+  Замени 192.168.123.222 на свой IP.
+-->
+<CycloneDDS xmlns="https://cdds.io/config"
+            xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+            xsi:schemaLocation="https://cdds.io/config https://raw.githubusercontent.com/eclipse-cyclonedds/cyclonedds/master/etc/cyclonedds.xsd">
+  <Domain Id="any">
+    <General>
+      <NetworkInterfaceAddress>192.168.123.222</NetworkInterfaceAddress>
+      <AllowMulticast>true</AllowMulticast>
+    </General>
+    <Discovery>
+      <ParticipantIndex>auto</ParticipantIndex>
+      <Peers>
+        <Peer Address="192.168.123.164"/>  <!-- G1 -->
+      </Peers>
+    </Discovery>
+  </Domain>
+</CycloneDDS>

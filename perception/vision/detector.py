@@ -87,18 +87,27 @@ class CupDetector:
     def detect_with_depth(
         self,
         rgb: np.ndarray,
-        depth: np.ndarray,           # RealSense depth frame, mm
+        depth: np.ndarray,           # RealSense depth frame (aligned to color), mm
         depth_scale: float = 0.001,  # обычно 0.001 (mm → m)
         intrinsics: Optional[dict] = None,
     ) -> list[Detection]:
         """
         Детекция + 3D координаты через RealSense depth.
 
-        intrinsics: {'fx': 615.0, 'fy': 615.0, 'ppx': 320, 'ppy': 240}
-        Если None — берём дефолт D435.
+        ⚠️ intrinsics УСТАНАВЛИВАЮТСЯ НА ЗАВОДЕ ДЛЯ КАЖДОГО ЭКЗЕМПЛЯРА D435.
+        НЕ хардкодь — читай с устройства через pyrealsense2:
+            profile = pipeline.get_active_profile()
+            intr = profile.get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics()
+            intrinsics = {'fx': intr.fx, 'fy': intr.fy, 'ppx': intr.ppx, 'ppy': intr.ppy, 'coeffs': intr.coeffs}
+
+        Для dev/test можно передать None — используем типичные D435 значения
+        (но в реале ВЫНУЖДЕННО будут другие!).
+
+        depth должен быть ALIGNED to color (rs.align(rs.stream.color)).
         """
         if intrinsics is None:
-            intrinsics = {"fx": 615.0, "fy": 615.0, "ppx": 320, "ppy": 240}
+            # Типичные значения D435 @ 1280x720, но НАДО ЧИТАТЬ С УСТРОЙСТВА
+            intrinsics = {"fx": 915.0, "fy": 915.0, "ppx": 640, "ppy": 360, "coeffs": [0, 0, 0, 0, 0]}
         fx, fy = intrinsics["fx"], intrinsics["fy"]
         ppx, ppy = intrinsics["ppx"], intrinsics["ppy"]
 
@@ -115,7 +124,8 @@ class CupDetector:
             z_mm = float(np.median(valid))
             z_m = z_mm * depth_scale
             d.depth_m = z_m
-            # Проекция в 3D (в системе координат камеры)
+            # Проекция в 3D (в системе координат камеры):
+            # x вправо, y вниз, z вперёд (оптическая ось)
             x_m = (cx - ppx) * z_m / fx
             y_m = (cy - ppy) * z_m / fy
             d.xyz_m = (x_m, y_m, z_m)
