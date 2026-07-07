@@ -1,0 +1,12 @@
+{
+  "_comment": "PLACEHOLDER. Заменить на реальные intrinsics с вашего D435 через scripts/run_test_vision.py --realsense или tests/test_realsense.py",
+  "_instructions": "python -c \"import pyrealsense2 as rs; p=rs.pipeline(); p.start(); i=p.get_active_profile().get_stream(rs.stream.color).as_video_stream_profile().get_intrinsics(); print({'fx':i.fx,'fy':i.fy,'ppx':i.ppx,'ppy':i.ppy,'coeffs':list(i.coeffs)})\"",
+  "fx": 615.0,
+  "fy": 615.0,
+  "ppx": 320.0,
+  "ppy": 240.0,
+  "coeffs": [0.0, 0.0, 0.0, 0.0, 0.0],
+  "resolution": [640, 480],
+  "fps": 30,
+  "model": "Intel RealSense D435"
+}

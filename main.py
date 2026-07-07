@@ -2,60 +2,309 @@
 Кузьмич — main entry point.
 
 Полный цикл "принеси кофе":
-1. Ждём голосовую команду
-2. Парсим через Whisper + LLM
-3. Запускаем behavior tree
+1. Ждём голосовую команду (или текстовый ввод в dev-режиме)
+2. Парсим через Whisper + LLM (или keyword-match fallback)
+3. Запускаем behavior tree с реальными компонентами
+
+Режимы:
+  python main.py                  — текстовый ввод, mock-робот (dev)
+  python main.py --mock           — явно mock-режим (всё симулировано)
+  python main.py --robot          — реальный G1 (нужен SDK + Ethernet)
+  python main.py --voice          — слушать микрофон через Whisper
+  python main.py --lowlevel       — включить low-level arm control (ОСТОРОЖНО)
+  python main.py --hand right|left— выбрать руку (default: right)
 """
+from __future__ import annotations
+
+import argparse
+import sys
 import time
+from pathlib import Path
+
+# Локальные импорты
 from perception.voice.assistant import VoiceAssistant, Goal
-from planning.behavior_tree import build_coffee_tree, Blackboard
+from planning.behavior_tree import build_coffee_tree, Blackboard, Status
 from interfaces.unitree_sdk import UnitreeG1Interface, MockG1Interface
 
 
-def main():
-    print("=" * 60)
-    print("КУЗЬМИЧ v0.1 — Coffee Bot")
-    print("=" * 60)
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="Кузьмич — Coffee Bot")
+    p.add_argument("--mock", action="store_true",
+                   help="Принудительный mock-режим (без реального железа)")
+    p.add_argument("--robot", action="store_true",
+                   help="Подключиться к реальному G1 (нужен SDK + Ethernet)")
+    p.add_argument("--lowlevel", action="store_true",
+                   help="Включить low-level arm control (ОПАСНО — можно уронить робота)")
+    p.add_argument("--voice", action="store_true",
+                   help="Слушать микрофон через Whisper (нужен openai-whisper)")
+    p.add_argument("--hand", choices=["left", "right"], default="right",
+                   help="Какой рукой брать чашку (default: right)")
+    p.add_argument("--whisper-model", default="medium",
+                   help="Whisper model: tiny/base/small/medium/large-v3")
+    p.add_argument("--ollama-model", default="gemma3:4b",
+                   help="Ollama model для парсинга команд")
+    p.add_argument("--ollama-host", default="http://localhost:11434",
+                   help="Ollama API host")
+    return p.parse_args()
 
-    # Инициализация (пока всё в Mock-режиме)
-    # voice = VoiceAssistant(whisper_model="medium", whisper_device="cuda:0")
-    robot = MockG1Interface()
+
+def setup_robot(args) -> object:
+    """Инициализация интерфейса робота (real или mock)."""
+    if args.robot and not args.mock:
+        robot = UnitreeG1Interface(
+            enable_low_level=args.lowlevel,
+        )
+        print("[main] Подключение к реальному G1...")
+    else:
+        robot = MockG1Interface(enable_low_level=args.lowlevel)
+        print("[main] Mock-режим (нет --robot флага)")
+
     robot.connect()
     robot.stand_up()
-    print("Кузьмич стоит и ждёт команду.\n")
+    return robot
 
-    # Главная петля
-    while True:
-        cmd = input(">>> ").strip().lower()
-        if cmd in ("quit", "exit", "q"):
-            print("Кузьмич: до свидания.")
-            break
-        if not cmd:
-            continue
 
-        # Mock-goal (в реале — voice.listen_and_parse("mic.wav"))
-        if "кофе" in cmd or "чай" in cmd or "принеси" in cmd:
-            goal = Goal(action="fetch", object="coffee", target="self", raw_text=cmd)
-        elif "стой" in cmd or "хватит" in cmd:
-            goal = Goal(action="abort", raw_text=cmd)
-        else:
-            goal = Goal(action="unknown", raw_text=cmd)
+def setup_voice(args) -> VoiceAssistant | None:
+    """Инициализация голосового ассистента. None если недоступен."""
+    if not args.voice:
+        return None
+    try:
+        assistant = VoiceAssistant(
+            whisper_model=args.whisper_model,
+            whisper_device="cuda:0" if _torch_cuda_available() else "cpu",
+            ollama_host=args.ollama_host,
+            ollama_model=args.ollama_model,
+        )
+        print(f"[main] VoiceAssistant: Whisper={args.whisper_model}, "
+              f"Ollama={args.ollama_model}")
+        return assistant
+    except Exception as e:
+        print(f"[main] VoiceAssistant недоступен: {e}")
+        print("[main] Fallback на keyword-match из текстового ввода")
+        return None
 
-        print(f"\nКузьмич понял: {goal}\n")
 
-        if goal.action == "fetch":
-            bb = Blackboard(goal={"raw": goal.raw_text})
-            tree = build_coffee_tree()
+def _torch_cuda_available() -> bool:
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+def keyword_fallback(text: str) -> Goal:
+    """Простой keyword-match если LLM недоступен."""
+    t = text.lower().strip()
+    if "кофе" in t:
+        return Goal(action="fetch", object="coffee", target="self", raw_text=text, confidence=0.7)
+    if "чай" in t:
+        return Goal(action="fetch", object="tea", target="self", raw_text=text, confidence=0.7)
+    if "принеси" in t and "олег" in t:
+        return Goal(action="fetch", object="coffee", target="Oleg", raw_text=text, confidence=0.6)
+    if any(w in t for w in ("стой", "хватит", "стоп")):
+        return Goal(action="abort", raw_text=text, confidence=0.9)
+    return Goal(action="unknown", raw_text=text, confidence=0.0)
+
+
+def run_coffee_task(robot, voice: VoiceAssistant | None, args) -> None:
+    """Запуск задачи 'принеси кофе'."""
+    # Lazy-импорт остальных компонентов (чтобы не тормозить startup)
+    from perception.tactile.rh56dftp import (
+        RH56DFTPDriver, MockRH56DFTPDriver, GripController,
+    )
+    from control.arm_controller import ArmController, DualArmController
+    from control.safety import SafetyMonitor
+    from action.handover import HandoverController
+
+    # Tactile
+    if args.mock or not args.robot:
+        tactile = MockRH56DFTPDriver(hand=args.hand)
+    else:
+        # TODO: читать порт из configs/tactile_port.json
+        tactile = RH56DFTPDriver(hand=args.hand, port="/dev/ttyUSB0")
+    tactile.connect()
+
+    # Arm controller
+    arm = ArmController(robot, side=args.hand)
+    arm.enable()
+
+    # Handover
+    handover = HandoverController(
+        robot=robot,
+        tactile_driver=tactile,
+        arm_ctrl=arm,
+        internal_force_drop_n=1.0,
+        timeout_s=15.0,
+    )
+
+    # Detector (опционально — только если ultralytics доступен)
+    detector = None
+    try:
+        from perception.vision.detector import CupDetector
+        device = "cuda:0" if _torch_cuda_available() else "cpu"
+        detector = CupDetector(model_path="yolov8m.pt", device=device)
+        print(f"[main] CupDetector loaded on {device}")
+    except Exception as e:
+        print(f"[main] CupDetector недоступен: {e}")
+        print("[main] FindCup будет возвращать FAILURE (нужно CV для работы)")
+
+    # Safety monitor (фоновый)
+    safety = SafetyMonitor(robot, tactile)
+    safety.start()
+
+    # Сборка дерева
+    tree = build_coffee_tree(
+        robot=robot,
+        detector=detector,
+        realsense=None,         # TODO: обёртка над pyrealsense2
+        tactile_driver=tactile,
+        arm_ctrl=arm,
+        handover_controller=handover,
+        grip_controller_cls=GripController,
+    )
+
+    try:
+        print("\n" + "=" * 60)
+        print("🤖 Кузьмич готов. Жду команду.")
+        print("   Введи текст или 'голос' для записи (если --voice)")
+        print("   'выход' / 'quit' — завершить")
+        print("=" * 60 + "\n")
+
+        while True:
+            try:
+                cmd = input(">>> ").strip()
+            except (EOFError, KeyboardInterrupt):
+                break
+
+            if not cmd:
+                continue
+            if cmd.lower() in ("выход", "quit", "exit", "q"):
+                print("Кузьмич: до свидания.")
+                break
+
+            # Голосовой ввод
+            if cmd.lower() == "голос" and voice is not None:
+                cmd = _record_and_transcribe(voice)
+                if not cmd:
+                    continue
+
+            # Парсинг команды
+            if voice is not None:
+                try:
+                    goal = voice.parse_command(cmd)
+                except Exception as e:
+                    print(f"[main] LLM parse failed ({e}), используем keyword-match")
+                    goal = keyword_fallback(cmd)
+            else:
+                goal = keyword_fallback(cmd)
+
+            print(f"\nКузьмич понял: {goal}\n")
+
+            if goal.action == "abort":
+                robot.emergency_stop()
+                safety.emergency_stop()
+                continue
+            if goal.action != "fetch":
+                print("Кузьмич: не понял, повтори.")
+                continue
+
+            # Запуск behavior tree
+            bb = Blackboard(goal={
+                "action": goal.action,
+                "object": goal.object,
+                "target": goal.target,
+                "raw": goal.raw_text,
+            })
+            print(f"\n--- Запуск behavior tree ---")
+            t0 = time.time()
             status = tree.tick(bb)
-            print(f"\nРезультат: {status.value} (ошибок: {bb.error_count})")
-        elif goal.action == "abort":
-            robot.emergency_stop()
-        else:
-            print("Кузьмич: не понял, повтори.")
+            dt = time.time() - t0
+            print(f"\n--- Результат: {status.value} за {dt:.1f}с, "
+                  f"ошибок: {bb.error_count} ---")
+            if bb.last_error:
+                print(f"    последняя ошибка: {bb.last_error}")
 
-        print()
+            tree.reset()
+            print()
 
-    robot.sit_down()
+    finally:
+        safety.stop()
+        try:
+            tactile.close()
+        except Exception:
+            pass
+        try:
+            arm.relax()
+        except Exception:
+            pass
+        try:
+            robot.stand_down()
+        except Exception:
+            pass
+
+
+def _record_and_transcribe(voice: VoiceAssistant) -> str:
+    """Запись 5 сек с микрофона → WAV → Whisper STT."""
+    try:
+        import wave
+        import tempfile
+        import os
+        try:
+            import pyaudio
+        except ImportError:
+            print("[main] pyaudio не установлен — запись невозможна")
+            return ""
+
+        print("[voice] Запись 5 сек...")
+        chunk = 1024
+        rate = 16000
+        channels = 1
+        p = pyaudio.PyAudio()
+        stream = p.open(format=pyaudio.paInt16, channels=channels,
+                        rate=rate, input=True, frames_per_buffer=chunk)
+        frames = []
+        for _ in range(0, int(rate / chunk * 5)):
+            data = stream.read(chunk)
+            frames.append(data)
+        stream.stop_stream()
+        stream.close()
+        p.terminate()
+
+        # Сохранить во временный WAV
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+            wf = wave.open(f.name, "wb")
+            wf.setnchannels(channels)
+            wf.setsampwidth(p.get_sample_size(pyaudio.paInt16))
+            wf.setframerate(rate)
+            wf.writeframes(b"".join(frames))
+            wf.close()
+            tmp_path = f.name
+
+        text = voice.transcribe(tmp_path)
+        os.unlink(tmp_path)
+        print(f"[voice] STT: {text!r}")
+        return text
+    except Exception as e:
+        print(f"[voice] error: {e}")
+        return ""
+
+
+def main():
+    args = parse_args()
+    print("=" * 60)
+    print("☕ КУЗЬМИЧ v0.2 — Coffee Bot for Unitree G1 EDU Ultimate")
+    print("=" * 60)
+
+    robot = setup_robot(args)
+    voice = setup_voice(args)
+
+    try:
+        run_coffee_task(robot, voice, args)
+    finally:
+        try:
+            robot.stand_down()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

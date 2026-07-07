@@ -2,7 +2,52 @@
 
 Unitree G1 EDU Ultimate humanoid robot, приносящий кофе по голосовой команде.
 
-## Железо
+## ⚡ Quick Start
+
+```bash
+# Установка зависимостей (dev/test без железа)
+pip install -r requirements.txt
+pip install pytest  # для unit-тестов
+
+# Mock-режим — всё работает без робота, через симуляции
+python main.py --mock
+>>> принеси кофе
+
+# Unit-тесты (без железа, 9 тестов)
+python tests/test_unit.py
+
+# E2E demo в mock-режиме
+python scripts/run_e2e_demo.py --mock
+
+# Тест отдельных компонентов
+python scripts/run_test_arm.py --mock          # прогон поз руки
+python scripts/run_test_tactile.py --mock      # тактильные сенсоры
+python scripts/run_test_walk.py --mock         # ходьба
+python scripts/run_test_vision.py              # YOLOv8 на веб-камере
+
+# На реальном роботе (нужен SDK + Ethernet 192.168.123.x)
+python main.py --robot                         # без low-level (только ходьба)
+python scripts/run_e2e_demo.py --robot --lowlevel  # с управлением руками
+```
+
+## 🎯 Что реализовано
+
+| Модуль | Статус | Описание |
+|---|---|---|
+| `control/arm_poses.py` | ✅ | 10 предустановленных поз (home/idle/pregrasp/grasp/lift/carry/handover/release/wave/point) с mirror для left/right |
+| `control/arm_controller.py` | ✅ | High-level обёртка, интерполяция, safe limits, mock-friendly |
+| `control/safety.py` | ✅ | Фоновый мониторинг: overforce/tilt/watchdog/battery, auto E-STOP |
+| `perception/vision/detector.py` | ✅ | YOLOv8m COCO 'cup' (class 41), RealSense depth → 3D |
+| `perception/tactile/rh56dftp.py` | ✅ | Modbus RTU драйвер + slip detection + MockRH56DFTPDriver для dev |
+| `perception/voice/assistant.py` | ✅ | Whisper STT + Ollama LLM (gemma3:4b) → JSON Goal |
+| `planning/behavior_tree.py` | ✅ | 8 узлов с DI: ParseCmd → Navigate → FindCup → Approach → Grasp → Return → HandOver → Confirm |
+| `interfaces/unitree_sdk.py` | ✅ | Real + Mock: SportClient (Move), LowCmd (arm/torso), HandClient (RH56DFTP), AudioClient (TTS), IMU/battery |
+| `action/handover.py` | ✅ | Closed-loop передача: ждёт падения силы → плавный release |
+| `scripts/run_*.py` | ✅ | 5 запускалок: calibrate, test_tactile, test_vision, test_walk, test_arm, e2e_demo |
+| `tests/test_unit.py` | ✅ | 9 unit-тестов: позы/mirror/limits, mock tactile, slip, BT, safety, handover |
+| `tests/test_walk_grasp.py` | ✅ | End-to-end стендовый тест (для 2 часов на роботе) |
+
+## 🤖 Железо
 
 | Компонент | Характеристика |
 |---|---|

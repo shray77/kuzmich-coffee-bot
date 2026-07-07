@@ -170,18 +170,41 @@ class RH56DFTPDriver:
         return [r * c["slope"] + c["offset"] for r, c in zip(raw, cals)]
 
     def read(self) -> TactileReading:
-        """Полное чтение: forces + tactile + производные метрики."""
+        """Полное чтение: forces + tactile + производные метрики (slip detection)."""
         forces = self.read_forces()
         tactile = self.read_tactile_raw()
         total = sum(forces)
         contact = total > 0.5  # >0.5 Н = контакт
+
+        # Slip detection через derivative of total force.
+        # Slip = быстрое падение суммарной силы.
+        # Используем ПРЕДЫДУЩИЙ контакт для триггера: если в предыдущем шаге
+        # был контакт, а сейчас сила резко упала — это slip (чашка уходит).
+        now = time.time()
+        slip = False
+        if not hasattr(self, "_prev_total"):
+            self._prev_total = total
+            self._prev_t = now
+            self._prev_contact = contact
+        else:
+            dt = now - self._prev_t
+            if dt > 1e-4:
+                dforce = total - self._prev_total
+                # Негативная производная (сила падает) при наличии контакта
+                dforce_dt = -dforce / dt  # Н/с, положительная = сила падает
+                if self._prev_contact and dforce_dt > 1.0:  # >1 Н/с падение = slip
+                    slip = True
+            self._prev_total = total
+            self._prev_t = now
+            self._prev_contact = contact
+
         return TactileReading(
-            timestamp=time.time(),
+            timestamp=now,
             forces_n=forces,
             tactile_raw=tactile,
             total_force_n=total,
             contact_detected=contact,
-            slip_detected=False,  # TODO: реализовать через derivative
+            slip_detected=slip,
         )
 
     def set_hand_position(self, positions: list[float]) -> None:
@@ -326,6 +349,92 @@ def run_full_calibration(
     print(f"\nКалибровка сохранена в {output_path}")
 
 
+# ─── Mock для dev/test (без железа) ─────────────────────────────────────
+
+class MockRH56DFTPDriver(RH56DFTPDriver):
+    """Симуляция RH56DFTP для разработки без железа.
+
+    Эмулирует:
+    - Базовый шум сенсоров (0.05 Н)
+    - При close_hand() сила растёт до grip_strength * max_force_n
+    - При open_hand() сила падает к нулю
+    - При call_on_external_force() — добавляет внешнее давление (для handover)
+    """
+
+    def __init__(
+        self,
+        hand: str = "right",
+        max_force_n: float = 5.0,
+        noise_std: float = 0.01,
+        num_tactile_sensors: int = 17,
+    ):
+        # Не вызываем super().__init__ чтобы не требовать port/baudrate
+        self.hand = hand
+        self.port = "MOCK"
+        self.baudrate = 0
+        self.slave_address = 0
+        self.num_tactile_sensors = num_tactile_sensors
+        self.max_force_n = max_force_n
+        self.noise_std = noise_std
+        self.calibration = {
+            "force_sensors": [{"slope": 0.1, "offset": 0.0} for _ in range(6)],
+            "tactile_sensors": [{"slope": 1.0, "offset": 0.0} for _ in range(num_tactile_sensors)],
+        }
+        self._client = None
+        self._grip_pos: float = 0.0           # 0..1
+        self._external_force_n: float = 0.0   # для симуляции handover
+        self._prev_total = 0.0
+        self._prev_t = time.time()
+        self._prev_contact = False
+
+    def connect(self) -> None:
+        print(f"[MockRH56DFTP {self.hand}] connected (SIMULATION)")
+
+    def close(self) -> None:
+        pass
+
+    def read_forces_raw(self) -> list[int]:
+        import random
+        base = self._grip_pos * self.max_force_n + self._external_force_n
+        noise = random.gauss(0, self.noise_std)
+        per_finger = max(0.0, base / 6.0 + noise)
+        return [int(per_finger * 10) for _ in range(6)]  # 0.1 Н/LSB
+
+    def read_tactile_raw(self) -> list[int]:
+        import random
+        return [random.randint(100, 200) for _ in range(self.num_tactile_sensors)]
+
+    def read_forces(self) -> list[float]:
+        raw = self.read_forces_raw()
+        cals = self.calibration["force_sensors"]
+        return [r * c["slope"] + c["offset"] for r, c in zip(raw, cals)]
+
+    def read_tactile(self) -> list[float]:
+        raw = self.read_tactile_raw()
+        cals = self.calibration["tactile_sensors"]
+        return [r * c["slope"] + c["offset"] for r, c in zip(raw, cals)]
+
+    def set_hand_position(self, positions: list[float]) -> None:
+        # Усредняем позицию как grip_pos
+        avg = sum(positions) / max(1, len(positions))
+        self._grip_pos = max(0.0, min(1.0, avg / 1.5))  # 1.5 рад = full close
+
+    def open_hand(self) -> None:
+        self._grip_pos = 0.0
+
+    def close_hand(self, grip_strength: float = 0.7) -> None:
+        self._grip_pos = max(0.0, min(1.0, grip_strength))
+
+    # ─── Спец-методы для симуляции ──────────────────────────────────────
+
+    def apply_external_force(self, force_n: float) -> None:
+        """Симулировать давление на кисть извне (например, человек взялся за чашку)."""
+        self._external_force_n = force_n
+
+    def reset_external(self) -> None:
+        self._external_force_n = 0.0
+
+
 # ─── Тест ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -341,9 +450,31 @@ if __name__ == "__main__":
             run_full_calibration(driver)
         finally:
             driver.close()
+    elif "--mock" in sys.argv or "--simulate" in sys.argv:
+        print("=== Mock RH56DFTP — 5 сек ===\n")
+        driver = MockRH56DFTPDriver(hand="right")
+        driver.connect()
+        driver.close_hand(0.5)
+        t0 = time.time()
+        while time.time() - t0 < 3:
+            r = driver.read()
+            print(f"  forces_n={[round(f,2) for f in r.forces_n]} total={r.total_force_n:.2f}N slip={r.slip_detected}")
+            time.sleep(0.1)
+        print("\n--- Simulate handover (external force drops) ---")
+        driver.apply_external_force(3.0)
+        for _ in range(10):
+            r = driver.read()
+            print(f"  total={r.total_force_n:.2f}N slip={r.slip_detected}")
+            time.sleep(0.1)
+        driver.apply_external_force(0.5)  # человек «взял» — сила упала
+        for _ in range(5):
+            r = driver.read()
+            print(f"  total={r.total_force_n:.2f}N slip={r.slip_detected}")
+            time.sleep(0.1)
     else:
         print("RH56DFTP driver — справка:")
         print("  --calibrate  калибровать все 6 сенсоров (нужны грузы)")
+        print("  --mock       запустить симуляцию (без железа)")
         print("  без флага    читает показания 5 сек и печатает")
         driver = RH56DFTPDriver(hand="right", port="/dev/ttyUSB0")
         try:
@@ -355,4 +486,4 @@ if __name__ == "__main__":
                 time.sleep(0.1)
         except Exception as e:
             print(f"Нет железа? Ошибка: {e}")
-            print("Запусти с --simulate для mock-режима")
+            print("Запусти с --mock для симуляции")
