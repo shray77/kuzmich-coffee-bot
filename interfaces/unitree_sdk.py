@@ -69,14 +69,15 @@ class UnitreeG1Interface:
         self.network_interface = network_interface
         self.enable_low_level = enable_low_level
         self._loco_client = None
+        self._audio_client = None
         self._low_level_client = None
         self._lowcmd_publisher = None
         self._lowstate = None
-        # Озвучка — по умолчанию встроенный TtsMaker (CN/EN). Чтобы Кузьмич
-        # говорил голосом Бурунова, передай сюда обёртку над
-        # synthesize_burunov_pcm()+AudioClient.PlayStream() из
-        # burunov-joke-bot/coffee_delivery.py (как только TTS-движок там будет
-        # доведён до рабочего состояния).
+        # Озвучка — по умолчанию встроенный TtsMaker (CN/EN, не Бурунов).
+        # Для голоса Бурунова используй play_pcm() с байтами из
+        # burunov-joke-bot/preset_audio.py (GET /presets/{name}/audio) —
+        # см. perception/voice/preset_client.py. speak_fn остаётся как общий
+        # хук для любой другой кастомной озвучки текста.
         self._speak_fn = speak_fn
 
     def connect(self) -> None:
@@ -110,6 +111,17 @@ class UnitreeG1Interface:
         ret = self._loco_client.Start()  # войти в main operation control
         if ret != 0:
             raise RuntimeError(f"LocoClient.Start() failed: {ret}")
+
+        # AudioClient — один раз тут, а не в каждом say()/play_pcm() (лишний
+        # Init() на каждый вызов и накладные расходы, и потенциально не всякая
+        # версия SDK любит повторный Init()).
+        try:
+            from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
+            self._audio_client = AudioClient()
+            self._audio_client.Init()
+        except Exception as e:
+            print(f"[UnitreeG1] AudioClient недоступен: {e}")
+            self._audio_client = None
 
         print(f"[UnitreeG1] connected via {self.network_interface} to {self.host}")
 
@@ -359,9 +371,10 @@ class UnitreeG1Interface:
     def say(self, text: str) -> None:
         """Озвучить текст.
 
-        Если в конструктор передан speak_fn — используем его (это путь для
-        голоса Бурунова: обёртка над synthesize_burunov_pcm()+PlayStream()).
-        Иначе — встроенный TtsMaker G1 (только CN/EN, не Бурунов).
+        Если в конструктор передан speak_fn — используем его. Иначе —
+        встроенный TtsMaker G1 (только CN/EN, НЕ Бурунов). Для голоса
+        Бурунова используй play_pcm() с готовым PCM из preset_client.py,
+        а не say() — TtsMaker не умеет клонированный голос в принципе.
         """
         if self._speak_fn is not None:
             try:
@@ -369,14 +382,37 @@ class UnitreeG1Interface:
                 return
             except Exception as e:
                 print(f"[UnitreeG1] speak_fn упал: {e}")
+                return
 
+        if self._audio_client is None:
+            print(f"[UnitreeG1] TTS недоступен (AudioClient не инициализирован): {text!r}")
+            return
         try:
-            from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
-            client = AudioClient()
-            client.Init()
-            client.TtsMaker(text, 0)
+            self._audio_client.TtsMaker(text, 0)
         except Exception as e:
             print(f"[UnitreeG1] TTS не доступен: {e}")
+
+    def play_pcm(self, pcm_bytes: bytes, sample_rate: int = 16000) -> bool:
+        """
+        Проиграть сырой PCM (16kHz, mono, 16-bit, без WAV-заголовка) через
+        AudioClient.PlayStream — родной путь для голоса Бурунова (пресеты
+        из burunov-joke-bot/preset_audio.py или live-синтез, когда появится).
+        """
+        if self._audio_client is None:
+            print(f"[UnitreeG1] play_pcm: AudioClient недоступен ({len(pcm_bytes)} bytes отброшены)")
+            return False
+        try:
+            pcm_list = list(pcm_bytes)
+            ret = self._audio_client.PlayStream("burunov_bot", "burunov_default", pcm_list)
+            if ret != 0:
+                print(f"[UnitreeG1] PlayStream вернул {ret}")
+                return False
+            dur = len(pcm_bytes) / (sample_rate * 2)
+            time.sleep(dur + 0.1)
+            return True
+        except Exception as e:
+            print(f"[UnitreeG1] play_pcm failed: {e}")
+            return False
 
     # ─── Safety ──────────────────────────────────────────────────────────
 
@@ -435,6 +471,12 @@ class MockG1Interface(UnitreeG1Interface):
 
     def say(self, text: str) -> None:
         print(f"[MockG1] 🗣 {text}")
+
+    def play_pcm(self, pcm_bytes: bytes, sample_rate: int = 16000) -> bool:
+        dur = len(pcm_bytes) / (sample_rate * 2)
+        print(f"[MockG1] 🔊 play_pcm {len(pcm_bytes)} bytes (~{dur:.1f}s)")
+        time.sleep(min(dur, 0.1))  # не тормозим тесты реальной длительностью
+        return True
 
     def set_arm_joint_positions(self, arm, positions, velocities=None,
                                  timeout=2.0, kp=80.0, kd=3.0):

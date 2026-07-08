@@ -117,9 +117,25 @@ def keyword_fallback(text: str) -> Goal:
 
 
 def tell_joke(robot, topic: str) -> None:
-    """Дёрнуть RAG /tell из burunov-joke-bot и озвучить результат через robot.say()."""
+    """
+    Если topic попадает в один из 5 фиксированных пресетов — говорим
+    intro+joke ГОЛОСОМ БУРУНОВА (preset_client.py, реальный синтезированный
+    голос). Для любой другой темы — RAG /tell из burunov-joke-bot даёт
+    текст на лету, но озвучить его Бурунов не может (XTTS слишком тяжёлый
+    для live на борту G1), так что это встроенный TTS через robot.say().
+    """
+    from perception.voice.preset_client import match_joke_topic, JOKE_TOPIC_PRESETS, speak_preset
+
+    preset_key = match_joke_topic(topic)
+    if preset_key is not None:
+        intro_name, joke_name = JOKE_TOPIC_PRESETS[preset_key]
+        print(f"  [joke] пресет голосом Бурунова: {preset_key}")
+        speak_preset(robot, intro_name)
+        speak_preset(robot, joke_name)
+        return
+
     import httpx
-    print(f"  [joke] запрашиваю RAG ({RAG_URL}/tell), topic={topic!r}")
+    print(f"  [joke] тема {topic!r} не в пресетах — RAG {RAG_URL}/tell (НЕ голос Бурунова)")
     try:
         with httpx.Client(timeout=15.0) as c:
             r = c.post(f"{RAG_URL}/tell", json={"topic": topic or "1986"})
@@ -248,6 +264,12 @@ def run_coffee_task(robot, voice: VoiceAssistant | None, args) -> None:
                 continue
 
             # Запуск behavior tree
+            from perception.voice.preset_client import speak_preset
+
+            recipient = goal.target if goal.target and goal.target != "self" else "Олег"
+            speak_preset(robot, "coffee_intro",
+                         fallback_text=f"Угу, щас, {recipient} Тарасыч... кофеварку найду...")
+
             bb = Blackboard(goal={
                 "action": goal.action,
                 "object": goal.object,
@@ -262,6 +284,16 @@ def run_coffee_task(robot, voice: VoiceAssistant | None, args) -> None:
                   f"ошибок: {bb.error_count} ---")
             if bb.last_error:
                 print(f"    последняя ошибка: {bb.last_error}")
+
+            # coffee_got_it/coffee_done уже озвучены внутри дерева
+            # (GraspCup/ConfirmDone). Тут — только исходы, до которых дерево
+            # само не договаривает голосом.
+            if status == Status.FAILURE:
+                if not bb.cup_detected:
+                    speak_preset(robot, "coffee_no_cup",
+                                 fallback_text=f"Не вижу никакой чашки, {recipient}. Где кофе-то?")
+                elif bb.cup_grasped and not bb.handover_complete:
+                    speak_preset(robot, "coffee_dropped", fallback_text="Ой... выронил, бля.")
 
             tree.reset()
             print()

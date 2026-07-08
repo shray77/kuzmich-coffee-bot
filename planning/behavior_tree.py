@@ -13,7 +13,7 @@ Behavior tree для задачи "принеси кофе".
   ├── GraspCup              # closed-loop grip с тактильной обратной связью
   ├── NavigateBackToUser    # вернуться к Олеже (по запомненной позиции)
   ├── HandOver              # передать чашку (detect hand + force release)
-  └── ConfirmDone           # голосом "держи, Олежа"
+  └── ConfirmDone           # голосом Бурунова (пресет coffee_done)
 
 Каждый узел возвращает Status.SUCCESS / Status.FAILURE / Status.RUNNING.
 Если какой-то узел упал — дерево перезапускается (макс 3 ретрая через Retry).
@@ -312,6 +312,11 @@ class GraspCup(Node):
                     self.arm_ctrl.move_to_pose("lift", duration=1.0)
                 except Exception:
                     pass
+                try:
+                    from perception.voice.preset_client import speak_preset
+                    speak_preset(self.arm_ctrl.robot, "coffee_got_it", fallback_text="Взял. Сейчас принесу.")
+                except Exception as e:
+                    bb.log.append(f"GraspCup: speak_preset failed: {e}")
                 return Status.SUCCESS
             if status == "overforce":
                 compliance = grip.compliance()
@@ -371,15 +376,16 @@ class HandOver(Node):
 
 
 class ConfirmDone(Node):
-    """Голосовая фраза «держи, Олежа»."""
+    """Голосовая фраза голосом Бурунова (coffee_done-пресет, см. preset_client.py)."""
     def __init__(self, robot, name: Optional[str] = None):
         super().__init__(name)
         self.robot = robot
 
     def tick(self, bb: Blackboard) -> Status:
-        print(f"  [{self.name}] 'Держи, Олежа!'")
+        print(f"  [{self.name}] coffee_done")
         try:
-            self.robot.say("Держи, Олежа!")
+            from perception.voice.preset_client import speak_preset
+            speak_preset(self.robot, "coffee_done", fallback_text="Держи, Олежа!")
         except Exception:
             pass
         return Status.SUCCESS
