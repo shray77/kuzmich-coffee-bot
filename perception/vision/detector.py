@@ -140,6 +140,81 @@ def find_best_cup(detections: list[Detection]) -> Optional[Detection]:
     return max(cups, key=lambda d: d.confidence)
 
 
+# ─── Камера → база робота ───────────────────────────────────────────────
+#
+# ⚠️ PLACEHOLDER-калибровка. Предполагает RealSense, жёстко закреплённый на
+# груди/голове G1, смотрящий строго вперёд без наклона/крена. Реальные
+# значения (высота крепления, смещение вперёд, поправка на наклон камеры)
+# нужно снять на физическом роботе и положить сюда или в отдельный
+# configs/camera_extrinsics.json (по аналогии с configs/realsense_intrinsics.json).
+CAMERA_MOUNT_HEIGHT_M = 1.1      # высота объектива камеры над полом/базой робота
+CAMERA_FORWARD_OFFSET_M = 0.05   # смещение камеры вперёд от базы робота
+
+
+def camera_to_robot_frame(
+    xyz_camera: tuple[float, float, float],
+) -> tuple[float, float, float]:
+    """
+    Переводит координаты объекта из системы камеры (x=вправо, y=вниз,
+    z=вперёд/depth — см. Detection.xyz_m) в систему базы робота
+    (x=вперёд, y=влево, z=высота от пола), которую ждут robot.move_to()
+    и ArmController.move_to_xyz() (см. их докстринги).
+
+    Без этой трансформации depth (реальное расстояние до объекта) никогда
+    не попадает в "вперёд" для навигации/руки — раньше он терялся.
+    """
+    cx, cy, cz = xyz_camera
+    robot_x = cz + CAMERA_FORWARD_OFFSET_M
+    robot_y = -cx
+    robot_z = CAMERA_MOUNT_HEIGHT_M - cy
+    return (robot_x, robot_y, robot_z)
+
+
+# ─── Mock для dev/test (без torch/ultralytics/камеры) ────────────────────
+
+class MockCupDetector:
+    """Симуляция CupDetector — та же сигнатура (detect/detect_with_depth),
+    но всегда «видит» одну чашку в заданной точке (система камеры:
+    x=вправо, y=вниз, z=depth), без torch/ultralytics и без реальной камеры.
+
+    Нужен чтобы FindCup/ApproachCup/GraspCup можно было прогнать в
+    scripts/run_e2e_demo.py --mock целиком, а не падать на "нет детектора".
+    """
+
+    def __init__(
+        self,
+        fake_cup_camera_xyz: tuple[float, float, float] = (0.05, 0.15, 0.6),
+        confidence: float = 0.9,
+    ):
+        self.fake_cup_camera_xyz = fake_cup_camera_xyz
+        self.confidence = confidence
+        self.device = "mock"
+
+    def detect(self, rgb: np.ndarray) -> list[Detection]:
+        return self._fake_detection()
+
+    def detect_with_depth(
+        self,
+        rgb: np.ndarray,
+        depth: np.ndarray,
+        depth_scale: float = 0.001,
+        intrinsics: Optional[dict] = None,
+    ) -> list[Detection]:
+        return self._fake_detection()
+
+    def _fake_detection(self) -> list[Detection]:
+        x, y, z = self.fake_cup_camera_xyz
+        return [Detection(
+            cls_id=41,
+            cls_name="cup",
+            confidence=self.confidence,
+            bbox_xyxy=(300, 200, 340, 260),
+            center_xy=(320, 230),
+            depth_m=z,
+            xyz_m=(x, y, z),
+        )]
+
+
 # ─── Тест ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

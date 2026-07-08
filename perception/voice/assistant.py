@@ -12,6 +12,7 @@ perception/voice/assistant.py
 Примеры:
   "Кузьмич, принеси кофе"        → {"action":"fetch","object":"coffee","target":"self"}
   "Принеси Олеже чай"            → {"action":"fetch","object":"tea","target":"Oleg"}
+  "Расскажи анекдот про Штирлица" → {"action":"tell_joke","topic":"Штирлиц"}
   "Стой на месте"                 → {"action":"freeze"}
   "Вернись на базу"               → {"action":"return_home"}
   "Что ты видишь?"                → {"action":"describe_scene"}
@@ -28,9 +29,10 @@ import httpx
 
 @dataclass
 class Goal:
-    action: str              # fetch | freeze | return_home | describe_scene | abort
+    action: str              # fetch | tell_joke | freeze | return_home | describe_scene | abort
     object: str = ""         # coffee | tea | water | ...
     target: str = "self"     # self | Oleg | ...
+    topic: str = ""          # для tell_joke: Штирлиц/Вовочка/... (пусто = любая тема)
     raw_text: str = ""
     confidence: float = 0.0
 
@@ -42,6 +44,8 @@ SYSTEM_PROMPT = """Ты — парсер голосовых команд для 
 Возможные действия:
 - fetch: принести объект. Поля: object (coffee/tea/water/beer/newspaper/phone),
   target (self/Oleg/Mom/Dad/имя)
+- tell_joke: рассказать анекдот. Поле: topic (тема анекдота, например
+  "Штирлиц"/"Вовочка"/"Ржевский"/"Чапаев"; пусто если тема не названа)
 - freeze: остановиться и стоять
 - return_home: вернуться на базу (зарядка)
 - describe_scene: описать что видит
@@ -52,6 +56,8 @@ SYSTEM_PROMPT = """Ты — парсер голосовых команд для 
 Примеры:
 "принеси кофе" → {"action":"fetch","object":"coffee","target":"self"}
 "Олежа хочет чай" → {"action":"fetch","object":"tea","target":"Oleg"}
+"расскажи анекдот" → {"action":"tell_joke","topic":""}
+"расскажи анекдот про Штирлица" → {"action":"tell_joke","topic":"Штирлиц"}
 "стой" → {"action":"freeze"}
 "хватит" → {"action":"abort"}
 "покажи что видишь" → {"action":"describe_scene"}
@@ -70,7 +76,7 @@ class VoiceAssistant:
         whisper_model: str = "medium",     # tiny/base/small/medium/large-v3
         whisper_device: str = "cuda:0",
         ollama_host: str = "http://localhost:11434",
-        ollama_model: str = "gemma3:4b",
+        ollama_model: str = "gemma4:e2b",  # Gemma 4 (апрель 2026), лёгкий вариант для CPU-only бортового ПК
     ):
         import whisper
         self.whisper = whisper.load_model(whisper_model).to(whisper_device)
@@ -112,6 +118,7 @@ class VoiceAssistant:
                 action=data.get("action", "unknown"),
                 object=data.get("object", ""),
                 target=data.get("target", "self"),
+                topic=data.get("topic", ""),
                 raw_text=text,
                 confidence=0.9,
             )

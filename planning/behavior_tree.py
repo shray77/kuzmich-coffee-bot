@@ -175,7 +175,7 @@ class FindCup(Node):
         self._attempts = 0
 
     def tick(self, bb: Blackboard) -> Status:
-        from perception.vision.detector import find_best_cup
+        from perception.vision.detector import find_best_cup, camera_to_robot_frame
         print(f"  [{self.name}] scanning for cup...")
 
         # Получаем кадр
@@ -198,9 +198,11 @@ class FindCup(Node):
             return Status.FAILURE
 
         if cup.xyz_m is not None:
-            bb.cup_xyz = cup.xyz_m
+            # cup.xyz_m — в системе камеры (x=вправо,y=вниз,z=depth), а робот
+            # (move_to/move_to_xyz) ждёт систему базы (x=вперёд,y=влево,z=высота).
+            bb.cup_xyz = camera_to_robot_frame(cup.xyz_m)
         else:
-            # Без depth — берём плоские координаты (placeholder)
+            # Без depth — берём координаты в системе робота (placeholder)
             bb.cup_xyz = (0.5, 0.0, 0.8)
 
         bb.cup_detected = True
@@ -301,7 +303,10 @@ class GraspCup(Node):
 
             if status == "stable":
                 bb.cup_grasped = True
-                print(f"  [{self.name}] grasped (step {step}, pos={pos:.2f})")
+                compliance = grip.compliance()
+                print(f"  [{self.name}] grasped (step {step}, pos={pos:.2f}, "
+                      f"compliance={compliance.classification.value}, "
+                      f"stiffness={compliance.stiffness})")
                 # 4. Поднять чашку
                 try:
                     self.arm_ctrl.move_to_pose("lift", duration=1.0)
@@ -309,7 +314,8 @@ class GraspCup(Node):
                     pass
                 return Status.SUCCESS
             if status == "overforce":
-                bb.err("GraspCup: overforce — aborting")
+                compliance = grip.compliance()
+                bb.err(f"GraspCup: overforce (compliance={compliance.classification.value}) — aborting")
                 grip.release()
                 return Status.FAILURE
             if status == "slip":

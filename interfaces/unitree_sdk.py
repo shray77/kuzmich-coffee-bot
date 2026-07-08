@@ -11,9 +11,12 @@ interfaces/unitree_sdk.py
 - ПК разработчика должен быть в 192.168.123.x/24
 - WiFi заблокирован по умолчанию (нужен кабель через свитч G1)
 
-High-level API:
-- SportClient: Move(vx,vy,vyaw), MoveTo(x,y,yaw), StopMove, StandUp, StandDown
-- LocoClient: StandUp(), Start() — для активации ходьбы
+High-level API (unitree_sdk2py.g1.loco.g1_loco_client.LocoClient — НЕ Go2 SportClient,
+это разные роботы с разным API):
+- LocoClient: Start(), StandUp(), Sit(), Move(vx,vy,vyaw), StopMove(), Damp(),
+  BalanceStand(), ContinuousGait(bool)
+- Позиционного MoveTo(x,y,yaw) в LocoClient нет — move_to() ниже эмулирует его
+  через разворот + прямолинейное движение по Move()+времени.
 - Low-level: LowCmd с q/dq/tau/Kp/Kd на каждый мотор, частота 500 Гц
 
 Калибровка G1 EDU снимает блокировку 500 Гц full joint control.
@@ -22,7 +25,11 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
+
+# Безопасные скорости для демо (см. burunov-joke-bot/coffee_delivery.py — та же логика)
+WALK_SPEED_M_S = 0.25
+TURN_SPEED_RAD_S = 0.5
 
 
 @dataclass
@@ -56,15 +63,21 @@ class UnitreeG1Interface:
         host: str = "192.168.123.164",   # дефолтный IP G1 по Ethernet
         network_interface: str = "eth0", # где поднят 192.168.123.x
         enable_low_level: bool = False,
+        speak_fn: Optional[Callable[[str], None]] = None,
     ):
         self.host = host
         self.network_interface = network_interface
         self.enable_low_level = enable_low_level
-        self._sport_client = None
         self._loco_client = None
         self._low_level_client = None
         self._lowcmd_publisher = None
         self._lowstate = None
+        # Озвучка — по умолчанию встроенный TtsMaker (CN/EN). Чтобы Кузьмич
+        # говорил голосом Бурунова, передай сюда обёртку над
+        # synthesize_burunov_pcm()+AudioClient.PlayStream() из
+        # burunov-joke-bot/coffee_delivery.py (как только TTS-движок там будет
+        # доведён до рабочего состояния).
+        self._speak_fn = speak_fn
 
     def connect(self) -> None:
         """Подключение к G1 через CycloneDDS.
@@ -76,7 +89,7 @@ class UnitreeG1Interface:
         """
         try:
             from unitree_sdk2py.core.channel import ChannelFactory
-            from unitree_sdk2py.go2.sport.sport_client import SportClient
+            from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
         except ImportError as e:
             raise RuntimeError(
                 "unitree_sdk2py не установлен.\n"
@@ -87,35 +100,36 @@ class UnitreeG1Interface:
                 "Также нужен cyclonedds: pip install cyclonedds"
             ) from e
 
-        # Инициализация ChannelFactory (DDS)
-        ChannelFactory.Initialize(self.network_interface)
-        ChannelFactory.SetLogLevel(2)  # INFO
+        # Инициализация ChannelFactory (DDS). domainId=0 — как в примерах Unitree.
+        ChannelFactory.Initialize(0, self.network_interface)
 
-        # High-level sport client (locomotion)
-        self._sport_client = SportClient()
-        self._sport_client.SetTimeout(5.0)
-        self._sport_client.Init()
+        # G1 использует LocoClient (Sport Services), а не Go2 SportClient —
+        # это разные роботы с разным API.
+        self._loco_client = LocoClient()
+        self._loco_client.Init()
+        ret = self._loco_client.Start()  # войти в main operation control
+        if ret != 0:
+            raise RuntimeError(f"LocoClient.Start() failed: {ret}")
 
         print(f"[UnitreeG1] connected via {self.network_interface} to {self.host}")
 
-    # ─── Locomotion (high-level, через SportClient) ──────────────────────
+    # ─── Locomotion (high-level, через LocoClient) ────────────────────────
 
     def stand_up(self) -> bool:
         """Встать из положения сидя/лежа."""
-        if not self._sport_client:
+        if not self._loco_client:
             raise RuntimeError("Не подключён")
-        # G1 sport_client StandUp (асинхронно, ждём завершения)
-        self._sport_client.StandUp()
+        ret = self._loco_client.StandUp()
         time.sleep(2.0)  # ожидание исполнения
-        return True
+        return ret == 0
 
     def stand_down(self) -> bool:
-        """Сесть/лечь."""
-        if not self._sport_client:
+        """Сесть/лечь (у G1 LocoClient это Sit(), а не StandDown())."""
+        if not self._loco_client:
             raise RuntimeError("Не подключён")
-        self._sport_client.StandDown()
+        ret = self._loco_client.Sit()
         time.sleep(2.0)
-        return True
+        return ret == 0
 
     def move(self, vx: float, vy: float, vyaw: float, duration_s: float = 1.0) -> None:
         """
@@ -124,28 +138,57 @@ class UnitreeG1Interface:
         vy: влево/вправо, м/с
         vyaw: вращение, рад/с
         duration_s: сколько секунд держать скорость
+
+        LocoClient.Move() по доке действует ~1с, поэтому шлём его в цикле,
+        пока не наберём duration_s (как в burunov-joke-bot/coffee_delivery.py).
         """
-        if not self._sport_client:
+        if not self._loco_client:
             raise RuntimeError("Не подключён")
-        self._sport_client.Move(vx, vy, vyaw)
-        time.sleep(duration_s)
-        self._sport_client.StopMove()
+        try:
+            self._loco_client.ContinuousGait(True)
+        except Exception:
+            pass
+        steps = max(1, int(duration_s * 10))
+        dt = duration_s / steps
+        for _ in range(steps):
+            self._loco_client.Move(vx, vy, vyaw)
+            time.sleep(dt)
+        self._loco_client.StopMove()
+        try:
+            self._loco_client.ContinuousGait(False)
+        except Exception:
+            pass
 
     def move_to(self, x: float, y: float, yaw: float = 0.0) -> bool:
         """
         Идти к целевой точке (x, y) в метрах относительно текущей позиции.
         yaw — целевой угол поворота в радианах.
+
+        ⚠️ G1 LocoClient не даёт позиционного MoveTo(x,y) как Go2 SportClient —
+        только Move(vx,vy,vyaw) по скорости. Поэтому сначала разворачиваемся
+        на угол до цели, потом едем по прямой на нужное расстояние. Это грубая
+        одометрия по времени (без обратной связи по реальной позиции) —
+        для точной навигации нужна телеметрия/SLAM.
         """
-        if not self._sport_client:
+        if not self._loco_client:
             raise RuntimeError("Не подключён")
-        self._sport_client.MoveTo(x, y, yaw)
-        # Ждём достижения (упрощённо — в реале нужен callback/telemetry)
-        time.sleep(max(2.0, (abs(x) + abs(y)) * 1.5))
+        import math
+        distance = math.hypot(x, y)
+        heading = math.atan2(y, x)
+
+        if abs(heading) > 1e-3:
+            turn_duration = abs(heading) / TURN_SPEED_RAD_S
+            self.move(0.0, 0.0, math.copysign(TURN_SPEED_RAD_S, heading), turn_duration)
+
+        if distance > 1e-3:
+            move_duration = distance / WALK_SPEED_M_S
+            self.move(WALK_SPEED_M_S, 0.0, 0.0, move_duration)
+
         return True
 
     def stop_move(self) -> None:
-        if self._sport_client:
-            self._sport_client.StopMove()
+        if self._loco_client:
+            self._loco_client.StopMove()
 
     # ─── Manipulation (low-level) ────────────────────────────────────────
 
@@ -314,26 +357,40 @@ class UnitreeG1Interface:
         return None
 
     def say(self, text: str) -> None:
-        """TTS через родной динамик G1 (AudioClient).
+        """Озвучить текст.
 
-        Для длинного текста лучше использовать стриминг — см. unitree_audio.py
-        из репо burunov-joke-bot.
+        Если в конструктор передан speak_fn — используем его (это путь для
+        голоса Бурунова: обёртка над synthesize_burunov_pcm()+PlayStream()).
+        Иначе — встроенный TtsMaker G1 (только CN/EN, не Бурунов).
         """
+        if self._speak_fn is not None:
+            try:
+                self._speak_fn(text)
+                return
+            except Exception as e:
+                print(f"[UnitreeG1] speak_fn упал: {e}")
+
         try:
-            from unitree_sdk2py.g1.audio.audio_client import AudioClient
+            from unitree_sdk2py.g1.audio.g1_audio_client import AudioClient
             client = AudioClient()
             client.Init()
-            # TTS через облако Unitree (требует интернет)
-            client.TTTS(text)
+            client.TtsMaker(text, 0)
         except Exception as e:
             print(f"[UnitreeG1] TTS не доступен: {e}")
 
     # ─── Safety ──────────────────────────────────────────────────────────
 
     def emergency_stop(self) -> None:
-        """Аварийная остановка: StopMove + damping mode."""
-        if self._sport_client:
-            self._sport_client.StopMove()
+        """Аварийная остановка: StopMove + Damp (обмякнуть)."""
+        if self._loco_client:
+            try:
+                self._loco_client.StopMove()
+            except Exception:
+                pass
+            try:
+                self._loco_client.Damp()
+            except Exception:
+                pass
         print("[UnitreeG1] E-STOP!")
 
     def release_motors(self) -> None:

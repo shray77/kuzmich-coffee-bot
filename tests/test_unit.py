@@ -89,6 +89,62 @@ def test_mock_tactile_slip():
     assert slip_detected, "Slip should be detected on rapid force drop"
 
 
+def test_compliance_estimator():
+    """ComplianceEstimator корректно классифицирует мягкий/средний/жёсткий объект."""
+    import numpy as np
+    from perception.tactile.compliance import ComplianceEstimator, Compliance
+
+    def simulate(k_true: float, steps: int = 20):
+        est = ComplianceEstimator()
+        pos = 0.0
+        for _ in range(steps):
+            pos += 0.03
+            est.update(pos, max(0.0, k_true * pos))
+        return est.estimate()
+
+    soft = simulate(k_true=1.5)
+    assert soft.classification == Compliance.SOFT, soft
+    rigid = simulate(k_true=20.0)
+    assert rigid.classification == Compliance.RIGID, rigid
+
+    empty = ComplianceEstimator().estimate()
+    assert empty.classification == Compliance.UNKNOWN, empty
+
+
+def test_grip_controller_soft_object_caps_force():
+    """GripController ловит мягкий объект и стабилизируется на пониженной цели,
+    вместо того чтобы бесконечно давить к недостижимому target_force_n."""
+    from perception.tactile.rh56dftp import MockRH56DFTPDriver, GripController
+    from perception.tactile.compliance import Compliance
+
+    # У мока force = grip_pos * max_force_n. max_force_n=2.0 => жёсткость ~2 Н/ед,
+    # это ниже SOFT_STIFFNESS_MAX_N (3.0) — эмулирует мягкий/хрупкий объект,
+    # который физически не может дать больше ~2Н, сколько ни дави.
+    driver = MockRH56DFTPDriver(hand="right", max_force_n=2.0, noise_std=0.0)
+    driver.connect()
+
+    # target_force_n=5.0 — цель, разумная для жёсткой кружки, но недостижимая
+    # для этого объекта. Без определения жёсткости хват просто не сойдётся.
+    grip = GripController(
+        driver, target_force_n=5.0, max_force_n=8.0,
+        soft_object_target_force_n=1.0, soft_object_max_force_n=2.0,
+    )
+    grip.reset()
+
+    final_status = None
+    for _ in range(300):
+        pos, status = grip.grip_step()
+        driver.close_hand(pos)
+        final_status = status
+        if status in ("stable", "overforce"):
+            break
+
+    assert final_status == "stable", \
+        f"Ожидали stable на пониженной цели для мягкого объекта, получили: {final_status}"
+    compliance = grip.compliance()
+    assert compliance.classification == Compliance.SOFT, compliance
+
+
 def test_behavior_tree_smoke():
     """Behavior tree с моками — должен дойти до ConfirmDone или упасть на FindCup."""
     from interfaces.unitree_sdk import MockG1Interface
@@ -189,6 +245,7 @@ if __name__ == "__main__":
     tests = [
         test_arm_poses, test_arm_poses_mirror, test_arm_poses_safe_limits,
         test_mock_tactile, test_mock_tactile_slip,
+        test_compliance_estimator, test_grip_controller_soft_object_caps_force,
         test_behavior_tree_smoke, test_safety_monitor,
         test_arm_controller_mock, test_handover_mock,
     ]

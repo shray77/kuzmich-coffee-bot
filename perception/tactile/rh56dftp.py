@@ -23,12 +23,15 @@ perception/tactile/rh56dftp.py
 from __future__ import annotations
 
 import json
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
+
+from .compliance import ComplianceEstimator, ComplianceReading, Compliance, is_confidently_soft
 
 
 @dataclass
@@ -80,6 +83,10 @@ class RH56DFTPDriver:
         self.num_tactile_sensors = num_tactile_sensors
         self.calibration = self._load_calibration(calibration_path)
         self._client = None
+        # read() вызывается одновременно из нескольких потоков (SafetyMonitor
+        # в фоне + основной сценарий) — без лока гонка ломает slip-detection
+        # (ложные "slip" из-за перемешанных _prev_total/_prev_t).
+        self._prev_lock = threading.Lock()
 
     def _load_calibration(self, path: Optional[str]) -> dict:
         """Загружает калибровочную таблицу: raw_value → Ньютоны."""
@@ -180,23 +187,32 @@ class RH56DFTPDriver:
         # Slip = быстрое падение суммарной силы.
         # Используем ПРЕДЫДУЩИЙ контакт для триггера: если в предыдущем шаге
         # был контакт, а сейчас сила резко упала — это slip (чашка уходит).
+        #
+        # read() дёргается из нескольких потоков одновременно (SafetyMonitor
+        # в фоне + основной сценарий) — лок защищает _prev_total/_prev_t от
+        # гонки, а MIN_DT_S защищает от усиления шума сенсора: если два вызова
+        # из разных потоков прилетают через доли миллисекунды, обычный шум
+        # (доли Н) делится на микроскопический dt и даёт огромную (ложную)
+        # производную силы. Ниже MIN_DT_S — просто не двигаем baseline.
+        MIN_DT_S = 0.02
         now = time.time()
         slip = False
-        if not hasattr(self, "_prev_total"):
-            self._prev_total = total
-            self._prev_t = now
-            self._prev_contact = contact
-        else:
-            dt = now - self._prev_t
-            if dt > 1e-4:
-                dforce = total - self._prev_total
-                # Негативная производная (сила падает) при наличии контакта
-                dforce_dt = -dforce / dt  # Н/с, положительная = сила падает
-                if self._prev_contact and dforce_dt > 1.0:  # >1 Н/с падение = slip
-                    slip = True
-            self._prev_total = total
-            self._prev_t = now
-            self._prev_contact = contact
+        with self._prev_lock:
+            if not hasattr(self, "_prev_total"):
+                self._prev_total = total
+                self._prev_t = now
+                self._prev_contact = contact
+            else:
+                dt = now - self._prev_t
+                if dt >= MIN_DT_S:
+                    dforce = total - self._prev_total
+                    # Негативная производная (сила падает) при наличии контакта
+                    dforce_dt = -dforce / dt  # Н/с, положительная = сила падает
+                    if self._prev_contact and dforce_dt > 1.0:  # >1 Н/с падение = slip
+                        slip = True
+                    self._prev_total = total
+                    self._prev_t = now
+                    self._prev_contact = contact
 
         return TactileReading(
             timestamp=now,
@@ -240,6 +256,13 @@ class GripController:
     """Closed-loop хват: сжимаем пальцы пока сила не достигнет target.
 
     На железе 2 часа — это ключевая логика, тестить в первую очередь.
+
+    По ходу сжатия оценивает жёсткость объекта (ComplianceEstimator, см.
+    compliance.py) по кривой сила/позиция. Если объект уверенно определён
+    как SOFT (бумажный стаканчик и т.п.) — на лету снижает целевую и
+    предельную силу (soft_object_target_force_n/soft_object_max_force_n),
+    чтобы не раздавить его тем же target_force_n, который нормален для
+    керамической кружки.
     """
 
     def __init__(
@@ -249,14 +272,23 @@ class GripController:
         max_force_n: float = 8.0,            # защита: не раздавить
         slip_threshold_n_per_s: float = 1.0, # 1 Н/с = быстрое падение
         poll_hz: float = 50.0,
+        soft_object_target_force_n: float = 1.0,  # цель для объекта, признанного SOFT
+        soft_object_max_force_n: float = 2.0,      # потолок для объекта, признанного SOFT
     ):
         self.driver = driver
         self.target_force_n = target_force_n
         self.max_force_n = max_force_n
         self.slip_threshold_n_per_s = slip_threshold_n_per_s
         self.poll_interval = 1.0 / poll_hz
+        self.soft_object_target_force_n = soft_object_target_force_n
+        self.soft_object_max_force_n = soft_object_max_force_n
         self._history: list[TactileReading] = []
         self._grip_position: float = 0.0
+        self._compliance = ComplianceEstimator()
+
+    def compliance(self) -> ComplianceReading:
+        """Текущая оценка жёсткости объекта по накопленным за этот хват сэмплам."""
+        return self._compliance.estimate()
 
     def grip_step(self) -> tuple[float, str]:
         """
@@ -270,8 +302,17 @@ class GripController:
         if len(self._history) > 10:
             self._history.pop(0)
 
+        # Если объект уверенно определён как мягкий/хрупкий — работаем с
+        # пониженными эффективными порогами силы на остаток этого хвата.
+        target_force_n = self.target_force_n
+        max_force_n = self.max_force_n
+        compliance = self._compliance.estimate()
+        if is_confidently_soft(compliance):
+            target_force_n = min(target_force_n, self.soft_object_target_force_n)
+            max_force_n = min(max_force_n, self.soft_object_max_force_n)
+
         # Защита от overforce
-        if reading.total_force_n > self.max_force_n:
+        if reading.total_force_n > max_force_n:
             return self._grip_position, "overforce"
 
         # Slip detection: сравниваем с предыдущим чтением
@@ -284,8 +325,12 @@ class GripController:
                     return self._grip_position + 0.05, "slip"
 
         # Достигли целевой силы → стабилизация
-        if reading.total_force_n >= self.target_force_n:
+        if reading.total_force_n >= target_force_n:
             return self._grip_position, "stable"
+
+        # Копим сэмпл (position, force) ДО обновления позиции ниже — это
+        # сила, соответствующая ТЕКУЩЕЙ (ещё не изменённой) позиции пальцев.
+        self._compliance.update(self._grip_position, reading.total_force_n)
 
         # Иначе сжимаем дальше
         self._grip_position = min(1.0, self._grip_position + 0.02)
@@ -294,6 +339,7 @@ class GripController:
     def reset(self) -> None:
         self._grip_position = 0.0
         self._history.clear()
+        self._compliance.reset()
 
     def release(self) -> None:
         """Разжимаем пальцы полностью."""
@@ -386,6 +432,7 @@ class MockRH56DFTPDriver(RH56DFTPDriver):
         self._prev_total = 0.0
         self._prev_t = time.time()
         self._prev_contact = False
+        self._prev_lock = threading.Lock()
 
     def connect(self) -> None:
         print(f"[MockRH56DFTP {self.hand}] connected (SIMULATION)")

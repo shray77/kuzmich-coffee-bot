@@ -72,14 +72,19 @@ def main():
 
     # 5. Detector (опционально)
     detector = None
-    try:
-        from perception.vision.detector import CupDetector
-        import torch
-        device = "cuda:0" if torch.cuda.is_available() else "cpu"
-        detector = CupDetector(model_path="yolov8m.pt", device=device)
-        print(f"[e2e] CupDetector loaded on {device}")
-    except Exception as e:
-        print(f"[e2e] CupDetector недоступен: {e}")
+    if args.mock or not args.robot:
+        from perception.vision.detector import MockCupDetector
+        detector = MockCupDetector()
+        print("[e2e] MockCupDetector (fake cup, без torch/ultralytics/камеры)")
+    else:
+        try:
+            from perception.vision.detector import CupDetector
+            import torch
+            device = "cuda:0" if torch.cuda.is_available() else "cpu"
+            detector = CupDetector(model_path="yolov8m.pt", device=device)
+            print(f"[e2e] CupDetector loaded on {device}")
+        except Exception as e:
+            print(f"[e2e] CupDetector недоступен: {e}")
 
     # 6. Safety
     safety = SafetyMonitor(robot, tactile)

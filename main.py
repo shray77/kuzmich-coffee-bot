@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -25,6 +26,9 @@ from pathlib import Path
 from perception.voice.assistant import VoiceAssistant, Goal
 from planning.behavior_tree import build_coffee_tree, Blackboard, Status
 from interfaces.unitree_sdk import UnitreeG1Interface, MockG1Interface
+
+# RAG-сервис анекдотов из соседнего репо burunov-joke-bot (api.py, POST /tell)
+RAG_URL = os.environ.get("RAG_URL", "http://127.0.0.1:8000")
 
 
 def parse_args() -> argparse.Namespace:
@@ -41,8 +45,8 @@ def parse_args() -> argparse.Namespace:
                    help="Какой рукой брать чашку (default: right)")
     p.add_argument("--whisper-model", default="medium",
                    help="Whisper model: tiny/base/small/medium/large-v3")
-    p.add_argument("--ollama-model", default="gemma3:4b",
-                   help="Ollama model для парсинга команд")
+    p.add_argument("--ollama-model", default="gemma4:e2b",
+                   help="Ollama model для парсинга команд (Gemma 4, апрель 2026)")
     p.add_argument("--ollama-host", default="http://localhost:11434",
                    help="Ollama API host")
     return p.parse_args()
@@ -92,6 +96,9 @@ def _torch_cuda_available() -> bool:
         return False
 
 
+JOKE_TOPICS = ["Штирлиц", "Вовочка", "Ржевский", "Чапаев", "Новые русские"]
+
+
 def keyword_fallback(text: str) -> Goal:
     """Простой keyword-match если LLM недоступен."""
     t = text.lower().strip()
@@ -101,9 +108,32 @@ def keyword_fallback(text: str) -> Goal:
         return Goal(action="fetch", object="tea", target="self", raw_text=text, confidence=0.7)
     if "принеси" in t and "олег" in t:
         return Goal(action="fetch", object="coffee", target="Oleg", raw_text=text, confidence=0.6)
+    if "анекдот" in t or "шутк" in t or "расскажи" in t:
+        topic = next((tp for tp in JOKE_TOPICS if tp.lower() in t), "")
+        return Goal(action="tell_joke", topic=topic, raw_text=text, confidence=0.7)
     if any(w in t for w in ("стой", "хватит", "стоп")):
         return Goal(action="abort", raw_text=text, confidence=0.9)
     return Goal(action="unknown", raw_text=text, confidence=0.0)
+
+
+def tell_joke(robot, topic: str) -> None:
+    """Дёрнуть RAG /tell из burunov-joke-bot и озвучить результат через robot.say()."""
+    import httpx
+    print(f"  [joke] запрашиваю RAG ({RAG_URL}/tell), topic={topic!r}")
+    try:
+        with httpx.Client(timeout=15.0) as c:
+            r = c.post(f"{RAG_URL}/tell", json={"topic": topic or "1986"})
+            r.raise_for_status()
+            text = r.json().get("text", "")
+    except Exception as e:
+        print(f"  [joke] RAG недоступен: {e}")
+        robot.say("Э, анекдот не грузится, RAG видимо не запущен.")
+        return
+    if not text:
+        robot.say("Не придумал анекдот, извини.")
+        return
+    print(f"  [joke] {text}")
+    robot.say(text)
 
 
 def run_coffee_task(robot, voice: VoiceAssistant | None, args) -> None:
@@ -137,16 +167,22 @@ def run_coffee_task(robot, voice: VoiceAssistant | None, args) -> None:
         timeout_s=15.0,
     )
 
-    # Detector (опционально — только если ultralytics доступен)
+    # Detector: в mock-режиме — фейковая чашка (без torch/ultralytics/камеры),
+    # на реальном роботе — настоящий YOLOv8
     detector = None
-    try:
-        from perception.vision.detector import CupDetector
-        device = "cuda:0" if _torch_cuda_available() else "cpu"
-        detector = CupDetector(model_path="yolov8m.pt", device=device)
-        print(f"[main] CupDetector loaded on {device}")
-    except Exception as e:
-        print(f"[main] CupDetector недоступен: {e}")
-        print("[main] FindCup будет возвращать FAILURE (нужно CV для работы)")
+    if args.mock or not args.robot:
+        from perception.vision.detector import MockCupDetector
+        detector = MockCupDetector()
+        print("[main] MockCupDetector (fake cup)")
+    else:
+        try:
+            from perception.vision.detector import CupDetector
+            device = "cuda:0" if _torch_cuda_available() else "cpu"
+            detector = CupDetector(model_path="yolov8m.pt", device=device)
+            print(f"[main] CupDetector loaded on {device}")
+        except Exception as e:
+            print(f"[main] CupDetector недоступен: {e}")
+            print("[main] FindCup будет возвращать FAILURE (нужно CV для работы)")
 
     # Safety monitor (фоновый)
     safety = SafetyMonitor(robot, tactile)
@@ -203,6 +239,9 @@ def run_coffee_task(robot, voice: VoiceAssistant | None, args) -> None:
             if goal.action == "abort":
                 robot.emergency_stop()
                 safety.emergency_stop()
+                continue
+            if goal.action == "tell_joke":
+                tell_joke(robot, goal.topic)
                 continue
             if goal.action != "fetch":
                 print("Кузьмич: не понял, повтори.")
