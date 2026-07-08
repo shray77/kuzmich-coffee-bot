@@ -96,7 +96,11 @@ def _torch_cuda_available() -> bool:
         return False
 
 
-JOKE_TOPICS = ["Штирлиц", "Вовочка", "Ржевский", "Чапаев", "Новые русские"]
+JOKE_TOPICS = [
+    "Штирлиц", "Вовочка", "Ржевский", "Чапаев", "Новый русский",
+    "Армия", "Одесса", "Рабинович",
+]  # для keyword_fallback (грубый intent-парсинг); реальный список тем с
+   # готовым звуком берётся динамически через preset_client._get_topics()
 
 
 def keyword_fallback(text: str) -> Goal:
@@ -118,21 +122,31 @@ def keyword_fallback(text: str) -> Goal:
 
 def tell_joke(robot, topic: str) -> None:
     """
-    Если topic попадает в один из 5 фиксированных пресетов — говорим
+    Если topic попадает в одну из тем с готовым звуком — говорим
     intro+joke ГОЛОСОМ БУРУНОВА (preset_client.py, реальный синтезированный
-    голос). Для любой другой темы — RAG /tell из burunov-joke-bot даёт
-    текст на лету, но озвучить его Бурунов не может (XTTS слишком тяжёлый
-    для live на борту G1), так что это встроенный TTS через robot.say().
+    голос). Анекдот выбирается случайно среди всех озвученных на эту тему
+    (изначально 1 на тему, после scripts/select_curated_jokes.py + Colab —
+    до ~5, так что повторный вопрос про ту же тему не всегда даёт одно и то
+    же). Для любой другой темы — RAG /tell из burunov-joke-bot даёт текст на
+    лету, но озвучить его Бурунов не может (XTTS слишком тяжёлый для live на
+    борту G1), так что это встроенный TTS через robot.say().
     """
-    from perception.voice.preset_client import match_joke_topic, JOKE_TOPIC_PRESETS, speak_preset
+    from perception.voice.preset_client import (
+        match_joke_topic, pick_joke_preset, JOKE_TOPIC_PRESETS, speak_preset,
+    )
 
     preset_key = match_joke_topic(topic)
     if preset_key is not None:
-        intro_name, joke_name = JOKE_TOPIC_PRESETS[preset_key]
-        print(f"  [joke] пресет голосом Бурунова: {preset_key}")
-        speak_preset(robot, intro_name)
-        speak_preset(robot, joke_name)
-        return
+        joke_name = pick_joke_preset(preset_key)
+        if joke_name is not None:
+            # Вступление — топиковое, не под конкретный анекдот (у кураторских
+            # анекдотов своего intro нет), берём из статического набора если есть.
+            intro_pair = JOKE_TOPIC_PRESETS.get(preset_key)
+            print(f"  [joke] пресет голосом Бурунова: {preset_key} -> {joke_name}")
+            if intro_pair is not None:
+                speak_preset(robot, intro_pair[0])
+            speak_preset(robot, joke_name)
+            return
 
     import httpx
     print(f"  [joke] тема {topic!r} не в пресетах — RAG {RAG_URL}/tell (НЕ голос Бурунова)")
