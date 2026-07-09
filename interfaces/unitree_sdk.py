@@ -89,7 +89,7 @@ class UnitreeG1Interface:
         3. CycloneDDS сконфигурирован (env CYCLONEDDS_URI)
         """
         try:
-            from unitree_sdk2py.core.channel import ChannelFactory
+            from unitree_sdk2py.core.channel import ChannelFactoryInitialize
             from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
         except ImportError as e:
             raise RuntimeError(
@@ -102,7 +102,9 @@ class UnitreeG1Interface:
             ) from e
 
         # Инициализация ChannelFactory (DDS). domainId=0 — как в примерах Unitree.
-        ChannelFactory.Initialize(0, self.network_interface)
+        # ChannelFactoryInitialize — отдельная функция, НЕ метод ChannelFactory.Initialize
+        # (подтверждено реальной ошибкой на роботе: "ChannelFactory has no attribute Initialize").
+        ChannelFactoryInitialize(0, self.network_interface)
 
         # G1 использует LocoClient (Sport Services), а не Go2 SportClient —
         # это разные роботы с разным API.

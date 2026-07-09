@@ -57,19 +57,19 @@ export CYCLONEDDS_URI=file://$PWD/cyclonedds.xml
 **Тест подключения:**
 ```python
 python -c "
-from unitree_sdk2py.core.channel import ChannelFactory
-from unitree_sdk2py.go2.sport.sport_client import SportClient
-ChannelFactory.Initialize('eth0')
-ChannelFactory.SetLogLevel(2)
-sc = SportClient()
+from unitree_sdk2py.core.channel import ChannelFactoryInitialize
+from unitree_sdk2py.g1.loco.g1_loco_client import LocoClient
+ChannelFactoryInitialize(0, 'eth0')
+sc = LocoClient()
 sc.SetTimeout(5.0)
 sc.Init()
-print('Connected! SportClient ready.')
+print('Connected! LocoClient ready.')
 "
 ```
+(или просто `python tests/test_sdk_connection.py eth0`)
 
-✅ Успех: `Connected! SportClient ready.`
-❌ Провал: проверь ping, firewall, CycloneDDS config.
+Успех: `Connected! LocoClient ready.`
+Провал: проверь ping, firewall, CycloneDDS config.
 
 ---
 
